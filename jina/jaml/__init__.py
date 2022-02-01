@@ -26,22 +26,31 @@ internal_var_regex = re.compile(
     r'{.+}|\$[a-zA-Z0-9_]*\b'
 )  # detects exp's of the form {var} or $var
 
-env_var_new_regex_str = r'\${{\s[a-zA-Z0-9_.]*\s}}'
-env_var_new_regex = re.compile(
-    env_var_new_regex_str
+context_regex_str = r'\${{\s[a-zA-Z0-9_]*\s}}'
+context_var_regex = re.compile(
+    context_regex_str
 )  # matches expressions of form '${{ var }}'
+
+new_env_regex_str = r'\${{\sENV\.[a-zA-Z0-9_]*\s}}|\${{\senv\.[a-zA-Z0-9_]*\s}}'
+new_env_var_regex = re.compile(
+    new_env_regex_str
+)  # matches expressions of form '${{ ENV.var }}' or '${{ env.var }}'
 
 env_var_deprecated_regex_str = r'\$[a-zA-Z0-9_]*'
 env_var_deprecated_regex = re.compile(
     r'\$[a-zA-Z0-9_]*'
 )  # matches expressions of form '$var'
 
-env_var_regex_str = env_var_deprecated_regex_str + '|' + env_var_deprecated_regex_str
+env_var_regex_str = env_var_deprecated_regex_str + '|' + new_env_regex_str
 env_var_regex = re.compile(env_var_regex_str)  # matches either of the above
 
 yaml_ref_regex = re.compile(
     r'\${{([\w\[\].]+)}}'
 )  # matches expressions of form '${{root.name[0].var}}'
+
+
+class ContextVarTemplate(string.Template):
+    delimiter = '$$'  # variables that should be substituted with values from the context are internally denoted with '$$'
 
 
 class JAML:
@@ -269,28 +278,39 @@ class JAML:
                             else:
                                 sub_d[idx] = _sub(v)
 
-        def _new_to_depr_env_syntax(v):
+        def _var_to_substitutable(v):
             def repl_fn(matchobj):
-                return '$' + matchobj.group(0)[4:-3]
+                return '$$' + matchobj.group(0)[4:-3]
 
-            return re.sub(env_var_new_regex, repl_fn, v)
+            return re.sub(new_env_var_regex, repl_fn, v)
+
+        def _to_env_var_synatx(v):
+            v = _var_to_substitutable(v)
+            v = v.replace('ENV.', '')
+            v = v.replace('env.', '')
+            return v[1:]
 
         def _sub(v):
-            if env_var_new_regex.findall(v):
-                v = _new_to_depr_env_syntax(
-                    v
-                )  # transform new-style env var syntax to old-style syntax
-            if env_var_deprecated_regex.findall(v):
-                v = v.replace('ENV.', '')  # replace redundant reference to ENV.
+            if env_var_deprecated_regex.findall(v):  # catch expressions of form '$var'
+                warnings.warn(
+                    'Specifying environment variables via the syntax `$var` is deprecated.'
+                    'Use `${{ ENV.var }}` instead.',
+                    category=DeprecationWarning,
+                )
+            if new_env_var_regex.findall(
+                v
+            ):  # handle expressions of form '${{ ENV.var}}'
+                v = _to_env_var_synatx(v)
+            if context_var_regex.findall(v):  # handle expressions of form '${{ var}}'
+                v = _var_to_substitutable(v)
                 if context:
-                    v = string.Template(v).safe_substitute(
+                    v = ContextVarTemplate(v).safe_substitute(
                         context
                     )  # use vars provided in context
-                v = os.path.expandvars(
-                    v
-                )  # gets env var and parses to python objects if needed
-            v = parse_arg(v)  # parse to python objects if still needed
-            return v
+            v = os.path.expandvars(
+                v
+            )  # gets env var and parses to python objects if needed
+            return parse_arg(v)
 
         def _resolve_yaml_reference(v, p):
             # resolve internal reference
